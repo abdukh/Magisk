@@ -1,18 +1,16 @@
 package com.topjohnwu.magisk.core.tasks
 
-import android.content.Context
 import android.net.Uri
 import androidx.core.net.toFile
 import com.topjohnwu.magisk.core.Const
+import com.topjohnwu.magisk.core.di.AppContext
+import com.topjohnwu.magisk.core.ktx.writeTo
 import com.topjohnwu.magisk.core.utils.MediaStoreUtils.displayName
 import com.topjohnwu.magisk.core.utils.MediaStoreUtils.inputStream
 import com.topjohnwu.magisk.core.utils.unzip
-import com.topjohnwu.magisk.ktx.writeTo
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.koin.core.KoinComponent
-import org.koin.core.inject
 import timber.log.Timber
 import java.io.File
 import java.io.FileNotFoundException
@@ -22,14 +20,13 @@ open class FlashZip(
     private val mUri: Uri,
     private val console: MutableList<String>,
     private val logs: MutableList<String>
-): KoinComponent {
+) {
 
-    private val context: Context by inject()
-    private val installDir = File(context.cacheDir, "flash")
+    private val installDir = File(AppContext.cacheDir, "flash")
     private lateinit var zipFile: File
 
     @Throws(IOException::class)
-    private fun flash(): Boolean {
+    private suspend fun flash(): Boolean {
         installDir.deleteRecursively()
         installDir.mkdirs()
 
@@ -50,13 +47,13 @@ open class FlashZip(
             }
         }
 
-        val isValid = runCatching {
+        val isValid = try {
             zipFile.unzip(installDir, "META-INF/com/google/android", true)
             val script = File(installDir, "updater-script")
             script.readText().contains("#MAGISK")
-        }.getOrElse {
+        } catch (e: IOException) {
             console.add("! Unzip error")
-            throw it
+            throw e
         }
 
         if (!isValid) {
@@ -66,7 +63,7 @@ open class FlashZip(
 
         console.add("- Installing ${mUri.displayName}")
 
-        return Shell.su("sh $installDir/update-binary dummy 1 \'$zipFile\'")
+        return Shell.cmd("sh $installDir/update-binary dummy 1 \'$zipFile\'")
             .to(console, logs).exec().isSuccess
     }
 
@@ -82,7 +79,7 @@ open class FlashZip(
             Timber.e(e)
             false
         } finally {
-            Shell.su("cd /", "rm -rf $installDir ${Const.TMPDIR}").submit()
+            Shell.cmd("cd /", "rm -rf $installDir ${Const.TMPDIR}").submit()
         }
     }
 }

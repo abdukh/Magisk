@@ -3,7 +3,6 @@ package com.topjohnwu.magisk.ui.surequest
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
 import android.content.res.Resources
 import android.graphics.drawable.Drawable
 import android.os.Bundle
@@ -21,28 +20,25 @@ import com.topjohnwu.magisk.BR
 import com.topjohnwu.magisk.R
 import com.topjohnwu.magisk.arch.BaseViewModel
 import com.topjohnwu.magisk.core.Config
-import com.topjohnwu.magisk.core.magiskdb.PolicyDao
-import com.topjohnwu.magisk.core.model.su.SuPolicy
+import com.topjohnwu.magisk.core.data.magiskdb.PolicyDao
+import com.topjohnwu.magisk.core.di.AppContext
+import com.topjohnwu.magisk.core.ktx.getLabel
+import com.topjohnwu.magisk.core.ktx.toast
 import com.topjohnwu.magisk.core.model.su.SuPolicy.Companion.ALLOW
 import com.topjohnwu.magisk.core.model.su.SuPolicy.Companion.DENY
 import com.topjohnwu.magisk.core.su.SuRequestHandler
-import com.topjohnwu.magisk.core.utils.BiometricHelper
+import com.topjohnwu.magisk.databinding.set
+import com.topjohnwu.magisk.events.AuthEvent
 import com.topjohnwu.magisk.events.DieEvent
 import com.topjohnwu.magisk.events.ShowUIEvent
-import com.topjohnwu.magisk.events.dialog.BiometricEvent
-import com.topjohnwu.magisk.ui.superuser.SpinnerRvItem
-import com.topjohnwu.magisk.utils.Utils
-import com.topjohnwu.magisk.utils.set
+import com.topjohnwu.magisk.utils.TextHolder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import me.tatarka.bindingcollectionadapter2.BindingListViewAdapter
-import me.tatarka.bindingcollectionadapter2.ItemBinding
 import java.util.concurrent.TimeUnit.SECONDS
 
 class SuRequestViewModel(
-    pm: PackageManager,
     policyDB: PolicyDao,
-    private val timeoutPrefs: SharedPreferences,
-    private val res: Resources
+    private val timeoutPrefs: SharedPreferences
 ) : BaseViewModel() {
 
     lateinit var icon: Drawable
@@ -50,8 +46,7 @@ class SuRequestViewModel(
     lateinit var packageName: String
 
     @get:Bindable
-    var denyText = res.getString(R.string.deny)
-        set(value) = set(value, field, { field = it }, BR.denyText)
+    val denyText = DenyText()
 
     @get:Bindable
     var selectedItemPosition = 0
@@ -67,32 +62,22 @@ class SuRequestViewModel(
         if (event.flags and MotionEvent.FLAG_WINDOW_IS_OBSCURED != 0
             || event.flags and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED != 0) {
             if (event.action == MotionEvent.ACTION_UP) {
-                Utils.toast(R.string.touch_filtered_warning, Toast.LENGTH_SHORT)
+                AppContext.toast(R.string.touch_filtered_warning, Toast.LENGTH_SHORT)
             }
             return@OnTouchListener Config.suTapjack
         }
         false
     }
 
-    private val items = res.getStringArray(R.array.allow_timeout).map { SpinnerRvItem(it) }
-    val adapter = BindingListViewAdapter<SpinnerRvItem>(1).apply {
-        itemBinding = ItemBinding.of { binding, _, item ->
-            item.bind(binding)
-        }
-        setItems(items)
-    }
-
-    private val handler = SuRequestHandler(pm, policyDB)
-    private lateinit var timer: CountDownTimer
+    private val handler = SuRequestHandler(AppContext.packageManager, policyDB)
+    private val millis = SECONDS.toMillis(Config.suDefaultTimeout.toLong())
+    private var timer = SuTimer(millis, 1000)
+    private var initialized = false
 
     fun grantPressed() {
         cancelTimer()
-        if (BiometricHelper.isEnabled) {
-            BiometricEvent {
-                onSuccess {
-                    respond(ALLOW)
-                }
-            }.publish()
+        if (Config.suAuth) {
+            AuthEvent { respond(ALLOW) }.publish()
         } else {
             respond(ALLOW)
         }
@@ -108,42 +93,63 @@ class SuRequestViewModel(
     }
 
     fun handleRequest(intent: Intent) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.Default) {
             if (handler.start(intent))
-                showDialog(handler.policy)
+                showDialog()
             else
                 DieEvent().publish()
         }
     }
 
-    private fun showDialog(policy: SuPolicy) {
-        icon = policy.icon
-        title = policy.appName
-        packageName = policy.packageName
-        selectedItemPosition = timeoutPrefs.getInt(policy.packageName, 0)
+    private fun showDialog() {
+        val pm = handler.pm
+        val info = handler.pkgInfo
+        val app = info.applicationInfo
+
+        if (app == null) {
+            // The request is not coming from an app process, and the UID is a
+            // shared UID. We have no way to know where this request comes from.
+            icon = pm.defaultActivityIcon
+            title = "[SharedUID] ${info.sharedUserId}"
+            packageName = info.sharedUserId
+        } else {
+            val prefix = if (info.sharedUserId == null) "" else "[SharedUID] "
+            icon = app.loadIcon(pm)
+            title = "$prefix${app.getLabel(pm)}"
+            packageName = info.packageName
+        }
+
+        selectedItemPosition = timeoutPrefs.getInt(packageName, 0)
 
         // Set timer
-        val millis = SECONDS.toMillis(Config.suDefaultTimeout.toLong())
-        timer = SuTimer(millis, 1000).apply { start() }
+        timer.start()
 
         // Actually show the UI
         ShowUIEvent(if (Config.suTapjack) EmptyAccessibilityDelegate else null).publish()
+        initialized = true
     }
 
     private fun respond(action: Int) {
+        if (!initialized) {
+            // ignore the response until showDialog done
+            return
+        }
+
         timer.cancel()
 
         val pos = selectedItemPosition
-        timeoutPrefs.edit().putInt(handler.policy.packageName, pos).apply()
-        handler.respond(action, Config.Value.TIMEOUT_LIST[pos])
+        timeoutPrefs.edit().putInt(packageName, pos).apply()
 
-        // Kill activity after response
-        DieEvent().publish()
+        viewModelScope.launch {
+            handler.respond(action, Config.Value.TIMEOUT_LIST[pos])
+            // Kill activity after response
+            DieEvent().publish()
+        }
     }
 
     private fun cancelTimer() {
         timer.cancel()
-        denyText = res.getString(R.string.deny)
+        denyText.seconds = 0
     }
 
     private inner class SuTimer(
@@ -155,27 +161,39 @@ class SuRequestViewModel(
             if (!grantEnabled && remains <= millis - 1000) {
                 grantEnabled = true
             }
-            denyText = "${res.getString(R.string.deny)} (${(remains / 1000) + 1})"
+            denyText.seconds = (remains / 1000).toInt() + 1
         }
 
         override fun onFinish() {
-            denyText = res.getString(R.string.deny)
+            denyText.seconds = 0
             respond(DENY)
         }
 
     }
 
+    inner class DenyText : TextHolder() {
+        var seconds = 0
+            set(value) = set(value, field, { field = it }, BR.denyText)
+
+        override fun getText(resources: Resources): CharSequence {
+            return if (seconds != 0)
+                "${resources.getString(R.string.deny)} ($seconds)"
+            else
+                resources.getString(R.string.deny)
+        }
+    }
+
     // Invisible for accessibility services
     object EmptyAccessibilityDelegate : View.AccessibilityDelegate() {
-        override fun sendAccessibilityEvent(host: View?, eventType: Int) {}
-        override fun performAccessibilityAction(host: View?, action: Int, args: Bundle?) = true
-        override fun sendAccessibilityEventUnchecked(host: View?, event: AccessibilityEvent?) {}
-        override fun dispatchPopulateAccessibilityEvent(host: View?, event: AccessibilityEvent?) = true
-        override fun onPopulateAccessibilityEvent(host: View?, event: AccessibilityEvent?) {}
-        override fun onInitializeAccessibilityEvent(host: View?, event: AccessibilityEvent?) {}
+        override fun sendAccessibilityEvent(host: View, eventType: Int) {}
+        override fun performAccessibilityAction(host: View, action: Int, args: Bundle?) = true
+        override fun sendAccessibilityEventUnchecked(host: View, event: AccessibilityEvent) {}
+        override fun dispatchPopulateAccessibilityEvent(host: View, event: AccessibilityEvent) = true
+        override fun onPopulateAccessibilityEvent(host: View, event: AccessibilityEvent) {}
+        override fun onInitializeAccessibilityEvent(host: View, event: AccessibilityEvent) {}
         override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {}
         override fun addExtraDataToAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo, extraDataKey: String, arguments: Bundle?) {}
-        override fun onRequestSendAccessibilityEvent(host: ViewGroup?, child: View?, event: AccessibilityEvent?): Boolean = false
-        override fun getAccessibilityNodeProvider(host: View?): AccessibilityNodeProvider? = null
+        override fun onRequestSendAccessibilityEvent(host: ViewGroup, child: View, event: AccessibilityEvent): Boolean = false
+        override fun getAccessibilityNodeProvider(host: View): AccessibilityNodeProvider? = null
     }
 }

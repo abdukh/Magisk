@@ -1,9 +1,7 @@
 package com.topjohnwu.magisk.core.utils
 
-import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
-import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -13,18 +11,15 @@ import androidx.annotation.RequiresApi
 import androidx.core.net.toFile
 import androidx.core.net.toUri
 import com.topjohnwu.magisk.core.Config
-import com.topjohnwu.magisk.ktx.get
+import com.topjohnwu.magisk.core.di.AppContext
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
-import java.io.OutputStream
-import java.security.MessageDigest
-import kotlin.experimental.and
 
 @Suppress("DEPRECATION")
 object MediaStoreUtils {
 
-    private val cr: ContentResolver by lazy { get<Context>().contentResolver }
+    private val cr get() = AppContext.contentResolver
 
     @get:RequiresApi(api = 29)
     private val tableUri
@@ -89,7 +84,7 @@ object MediaStoreUtils {
 
     @Throws(IOException::class)
     fun getFile(displayName: String, skipQuery: Boolean = false): UriFile {
-        if (Build.VERSION.SDK_INT < 30) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             // Fallback to file based I/O pre Android 11
             val parent = File(Environment.getExternalStorageDirectory(), relativePath)
             parent.mkdirs()
@@ -103,6 +98,8 @@ object MediaStoreUtils {
     fun Uri.inputStream() = cr.openInputStream(this) ?: throw FileNotFoundException()
 
     fun Uri.outputStream() = cr.openOutputStream(this, "rwt") ?: throw FileNotFoundException()
+
+    fun Uri.fileDescriptor(mode: String) = cr.openFileDescriptor(this, mode) ?: throw FileNotFoundException()
 
     val Uri.displayName: String get() {
         if (scheme == "file") {
@@ -119,24 +116,6 @@ object MediaStoreUtils {
         }
         return this.toString()
     }
-
-    fun Uri.checkSum(alg: String, reference: String) = runCatching {
-        this.inputStream().use {
-            val digest = MessageDigest.getInstance(alg)
-            it.copyTo(object : OutputStream() {
-                override fun write(b: Int) {
-                    digest.update(b.toByte())
-                }
-
-                override fun write(b: ByteArray, off: Int, len: Int) {
-                    digest.update(b, off, len)
-                }
-            })
-            val sb = StringBuilder()
-            digest.digest().forEach { b -> sb.append("%02x".format(b and 0xff.toByte())) }
-            sb.toString() == reference
-        }
-    }.getOrElse { false }
 
     interface UriFile {
         val uri: Uri

@@ -2,11 +2,13 @@ package com.topjohnwu.magisk.core.base
 
 import android.app.Service
 import android.content.Context
-import com.topjohnwu.magisk.core.wrap
-import org.koin.core.KoinComponent
+import android.content.Intent
+import android.os.IBinder
+import com.topjohnwu.magisk.core.patch
 
-abstract class BaseService : Service(), KoinComponent {
+open class BaseService : Service() {
     override fun attachBaseContext(base: Context) {
-        super.attachBaseContext(base.wrap())
+        super.attachBaseContext(base.patch())
     }
+    override fun onBind(intent: Intent?): IBinder? = null
 }
